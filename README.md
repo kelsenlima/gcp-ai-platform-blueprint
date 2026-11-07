@@ -1,5 +1,8 @@
 # GCP AI Platform Blueprint
 
+<!-- ARCHITECTURE GIF: replace docs/architecture.gif to update the animation. -->
+![Animated architecture diagram: a developer push triggers an Azure DevOps pipeline, which signs in to Google Cloud through keyless identity federation, pushes the image to Artifact Registry and deploys it to Cloud Run in dev, connected to Cloud SQL and Vertex AI; the same image is then promoted to Cloud Run in stage, where users sign in through IAP. Infrastructure is managed with Terraform.](docs/architecture.gif)
+
 A reusable Terraform blueprint for a small **Google Cloud platform for AI apps and internal
 demos** (portals, agents, prototypes built with AI coding tools), with **dev** and **stage**
 environments and **Azure DevOps** pipelines that deploy **without any service account key**.
@@ -7,9 +10,6 @@ environments and **Azure DevOps** pipelines that deploy **without any service ac
 Apps run on Cloud Run behind IAP, talk to a private-IP-only Cloud SQL for PostgreSQL and call
 Gemini on Vertex AI. Stage only ever receives the **exact image (same digest)** that already
 ran in dev.
-
-<!-- ARCHITECTURE GIF: replace docs/architecture.gif to update the animation. -->
-![Architecture animation](docs/architecture.gif)
 
 ## Architecture
 
