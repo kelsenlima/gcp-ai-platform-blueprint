@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env*
+node_modules
+__pycache__
+*.pyc
+.venv
+venv
+dist
+azure-pipelines.yml
+Dockerfile*
+README.md

@@ -1,0 +1,196 @@
+# Pipeline of every app. App repositories only EXTEND this template (enforced by the
+# "Required template" check on the service connection) and set the parameters below.
+#
+#   develop -> Validate -> Build (push apps/<app>:<commit>) -> Deploy to dev by digest
+#   main    -> Validate -> Promote to stage: NO build. Takes the second parent of the merge
+#              commit (the develop commit that was merged), checks that dev runs exactly the
+#              image built for that commit from the apps repository, and deploys the same
+#              digest to stage.
+#
+# The PR develop -> main must use "Merge (no fast-forward)". Squash or rebase creates a commit
+# with one parent that never ran in dev, and the promotion is refused.
+parameters:
+  - name: app
+    type: string
+  - name: iap
+    type: boolean
+    default: true
+  - name: maxInstances
+    type: number
+    default: 2
+  - name: healthPath
+    type: string
+    default: /api/health
+  - name: secretsDev
+    type: string
+    default: ""
+  - name: secretsStage
+    type: string
+    default: ""
+  - name: envVars
+    type: string
+    default: ""
+  - name: dockerfile
+    type: string
+    default: Dockerfile
+  - name: buildContext
+    type: string
+    default: .
+
+variables:
+  - template: platform-vars.yml
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Validate
+    displayName: Validate
+    jobs:
+      - job: validate
+        displayName: Validate parameters and branch
+        steps:
+          - checkout: none
+          - bash: |
+              set -euo pipefail
+              fail() { echo "##vso[task.logissue type=error]$1"; exit 1; }
+
+              [[ "$APP" =~ ^[a-z]([a-z0-9-]{0,48}[a-z0-9])?$ ]] \
+                || fail "app '$APP' is invalid: lowercase letters, digits and hyphens, up to 50 characters, starting with a letter."
+              [[ "$HEALTH_PATH" =~ ^/[A-Za-z0-9/_.-]*$ ]] || fail "healthPath '$HEALTH_PATH' must start with /."
+              [[ "$MAX_INSTANCES" =~ ^[0-9]+$ ]] && [ "$MAX_INSTANCES" -ge 1 ] && [ "$MAX_INSTANCES" -le 10 ] \
+                || fail "maxInstances must be between 1 and 10."
+
+              secret_re='^[A-Z_][A-Z0-9_]*=[A-Za-z0-9_-]+:(latest|[0-9]+)$'
+              env_re='^[A-Z_][A-Z0-9_]*=[^,]*$'
+              for s in ${SECRETS_DEV//,/ } ${SECRETS_STAGE//,/ }; do
+                [[ "$s" =~ $secret_re ]] || fail "secret '$s' must be ENV_VAR=secret-name:version."
+              done
+              IFS=',' read -ra pairs <<< "$ENV_VARS"
+              for p in "${pairs[@]}"; do
+                [ -z "$p" ] || [[ "$p" =~ $env_re ]] || fail "envVars entry '$p' must be NAME=value."
+                case "${p%%=*}" in APP_ENV|VERTEX_PROJECT|VERTEX_LOCATION|DB_INSTANCE) fail "envVars cannot override ${p%%=*}." ;; esac
+              done
+
+              case "$BUILD_SOURCEBRANCH" in
+                refs/heads/develop|refs/heads/main) ;;
+                *) fail "branch '$BUILD_SOURCEBRANCH' is outside the flow (only develop and main)." ;;
+              esac
+              echo "Parameters OK for $APP on $BUILD_SOURCEBRANCH"
+            displayName: Validate
+            env:
+              APP: ${{ parameters.app }}
+              HEALTH_PATH: ${{ parameters.healthPath }}
+              MAX_INSTANCES: ${{ parameters.maxInstances }}
+              SECRETS_DEV: ${{ parameters.secretsDev }}
+              SECRETS_STAGE: ${{ parameters.secretsStage }}
+              ENV_VARS: ${{ parameters.envVars }}
+
+  - stage: Build
+    displayName: Build
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - job: build
+        displayName: Build and push
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - template: steps/gcp-auth.yml
+          - bash: |
+              set -euo pipefail
+              IMAGE="${REGISTRY}/${APP}:${BUILD_SOURCEVERSION}"
+              docker build -f "$DOCKERFILE" -t "$IMAGE" "$CONTEXT"
+              docker push "$IMAGE"
+              DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')
+              [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "##vso[task.logissue type=error]Could not read the digest of $IMAGE"; exit 1; }
+              echo "Pushed ${REGISTRY}/${APP}@${DIGEST}"
+              echo "##vso[task.setvariable variable=digest;isOutput=true]$DIGEST"
+            name: push
+            displayName: Build and push apps/${{ parameters.app }}:<commit>
+            env:
+              APP: ${{ parameters.app }}
+              DOCKERFILE: ${{ parameters.dockerfile }}
+              CONTEXT: ${{ parameters.buildContext }}
+              REGISTRY: $(gcpRegistry)
+          - template: steps/gcp-cleanup.yml
+
+  - stage: DeployDev
+    displayName: Deploy to dev
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    variables:
+      digest: $[ stageDependencies.Build.build.outputs['push.digest'] ]
+    jobs:
+      - job: deploy
+        displayName: Deploy to dev by digest
+        steps:
+          - checkout: none
+          - template: steps/gcp-auth.yml
+          - template: steps/deploy.yml
+            parameters:
+              environment: dev
+              image: $(gcpRegistry)/${{ parameters.app }}@$(digest)
+              app: ${{ parameters.app }}
+              iap: ${{ parameters.iap }}
+              maxInstances: ${{ parameters.maxInstances }}
+              healthPath: ${{ parameters.healthPath }}
+              secrets: ${{ parameters.secretsDev }}
+              envVars: ${{ parameters.envVars }}
+          - template: steps/gcp-cleanup.yml
+
+  - stage: PromoteStage
+    displayName: Promote to stage
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: promote
+        displayName: Promote the dev digest (no build)
+        steps:
+          - checkout: self
+            fetchDepth: 2 # the merge commit and its parents
+          - template: steps/gcp-auth.yml
+          - bash: |
+              set -euo pipefail
+              fail() { echo "##vso[task.logissue type=error]Refused: $1"; exit 1; }
+
+              read -ra PARENTS <<< "$(git rev-list --parents -n 1 HEAD)"
+              N=$(( ${#PARENTS[@]} - 1 ))
+              HINT="Complete the PR develop -> main with 'Merge (no fast-forward)'."
+              [ "$N" -eq 2 ] || fail "commit ${PARENTS[0]} on main is not a merge (it has $N parent(s)). $HINT"
+              MERGED="${PARENTS[2]}" # second parent = the develop commit that was merged
+
+              REPO_PATH="${REGISTRY}/${APP}"
+              EXPECTED=$(gcloud artifacts docker images describe "${REPO_PATH}:${MERGED}" \
+                --format='value(image_summary.digest)' 2>/dev/null || true)
+              [ -n "$EXPECTED" ] || fail "the merged commit $MERGED was never published by the pipeline (${REPO_PATH}:${MERGED})."
+
+              DEV_IMAGE=$(gcloud run services describe "$APP" --project "${PREFIX}-dev" --region "$REGION" \
+                --format='value(spec.template.spec.containers[0].image)')
+              case "$DEV_IMAGE" in
+                "${REPO_PATH}@sha256:"*) ;;
+                *) fail "$APP in dev does not run a pipeline image (${REPO_PATH}@...), it runs '$DEV_IMAGE'." ;;
+              esac
+              DEV_DIGEST="${DEV_IMAGE#*@}"
+              [ "$DEV_DIGEST" = "$EXPECTED" ] \
+                || fail "dev runs $DEV_DIGEST, but the merged commit $MERGED is $EXPECTED."
+
+              echo "Promoting ${REPO_PATH}@${EXPECTED} (commit $MERGED) to stage"
+              echo "##vso[task.setvariable variable=promotedImage]${REPO_PATH}@${EXPECTED}"
+            displayName: Check second parent and dev digest
+            env:
+              APP: ${{ parameters.app }}
+              REGISTRY: $(gcpRegistry)
+              PREFIX: $(gcpPrefix)
+              REGION: $(gcpRegion)
+          - template: steps/deploy.yml
+            parameters:
+              environment: stage
+              image: $(promotedImage)
+              app: ${{ parameters.app }}
+              iap: ${{ parameters.iap }}
+              maxInstances: ${{ parameters.maxInstances }}
+              healthPath: ${{ parameters.healthPath }}
+              secrets: ${{ parameters.secretsStage }}
+              envVars: ${{ parameters.envVars }}
+          - template: steps/gcp-cleanup.yml

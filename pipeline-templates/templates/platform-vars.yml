@@ -1,0 +1,20 @@
+# Platform settings shared by every app pipeline. Fill in once, after the bootstrap apply.
+# All values below are fictitious placeholders.
+variables:
+  # Name and ID of the Azure Resource Manager service connection (workload identity
+  # federation, manual) that the GCP provider trusts (bootstrap: azdo_service_connection_*).
+  gcpServiceConnection: gcp-ai-platform
+  gcpServiceConnectionId: 22222222-2222-2222-2222-222222222222
+
+  # terraform -chdir=infra/bootstrap output -raw workload_identity_provider
+  gcpWorkloadIdentityProvider: projects/000000000000/locations/global/workloadIdentityPools/azure-devops/providers/azdo-org
+
+  gcpPrefix: acme-ai
+  gcpRegion: us-central1
+  # Empty: each environment uses Vertex AI in its own project.
+  gcpVertexProject: ""
+
+  # Derived names (match the Terraform conventions; do not change).
+  gcpSharedProject: $(gcpPrefix)-shared
+  gcpDeployer: deployer@$(gcpPrefix)-shared.iam.gserviceaccount.com
+  gcpRegistry: $(gcpRegion)-docker.pkg.dev/$(gcpPrefix)-shared/apps

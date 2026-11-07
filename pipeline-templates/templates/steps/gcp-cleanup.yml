@@ -1,0 +1,6 @@
+# Always runs, even when the job fails or is cancelled: deletes the token, the credential
+# configuration and the gcloud/Docker settings created by gcp-auth.yml.
+steps:
+  - bash: rm -rf "$AGENT_TEMPDIRECTORY/gcp"
+    displayName: Delete Google Cloud credentials
+    condition: always()

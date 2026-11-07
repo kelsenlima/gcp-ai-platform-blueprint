@@ -1,0 +1,65 @@
+# Deploys one image, always pinned by digest, to Cloud Run with the platform settings.
+parameters:
+  - name: environment # dev | stage
+    type: string
+  - name: image # <registry>/<app>@sha256:...
+    type: string
+  - name: app
+    type: string
+  - name: iap
+    type: boolean
+  - name: maxInstances
+    type: number
+  - name: healthPath
+    type: string
+  - name: secrets
+    type: string
+  - name: envVars
+    type: string
+
+steps:
+  - bash: |
+      set -euo pipefail
+      case "$IMAGE" in
+        *@sha256:*) ;;
+        *) echo "##vso[task.logissue type=error]Refusing to deploy an image that is not pinned by digest: '$IMAGE'"; exit 1 ;;
+      esac
+
+      PROJECT="${PREFIX}-${ENVIRONMENT}"
+      VERTEX="${VERTEX_PROJECT:-$PROJECT}"
+      # Platform variables (apps cannot override them; see Validate in app.yml).
+      ENV_LIST="APP_ENV=${ENVIRONMENT},VERTEX_PROJECT=${VERTEX},VERTEX_LOCATION=global"
+      ENV_LIST="${ENV_LIST},DB_INSTANCE=${PROJECT}:${REGION}:ai-pg-${ENVIRONMENT}"
+      if [ -n "$ENV_VARS" ]; then ENV_LIST="${ENV_LIST},${ENV_VARS}"; fi
+
+      if [ "$IAP" = "True" ]; then IAP_FLAG=--iap; else IAP_FLAG=--no-iap; fi
+      SECRETS_FLAG=(--clear-secrets)
+      if [ -n "$SECRETS" ]; then SECRETS_FLAG=(--set-secrets "$SECRETS"); fi
+
+      gcloud run deploy "$APP" \
+        --project "$PROJECT" --region "$REGION" \
+        --image "$IMAGE" \
+        --service-account "run-runtime@${PROJECT}.iam.gserviceaccount.com" \
+        --ingress all --no-allow-unauthenticated "$IAP_FLAG" \
+        --min-instances 0 --max-instances "$MAX_INSTANCES" \
+        --cpu 1 --memory 512Mi --cpu-boost --execution-environment gen2 \
+        --network ai-vpc --subnet "ai-vpc-${REGION}" --vpc-egress private-ranges-only \
+        --startup-probe "httpGet.path=${HEALTH_PATH},periodSeconds=3,timeoutSeconds=2,failureThreshold=10" \
+        --liveness-probe "httpGet.path=${HEALTH_PATH},periodSeconds=30,timeoutSeconds=3,failureThreshold=3" \
+        --set-env-vars "$ENV_LIST" \
+        "${SECRETS_FLAG[@]}" \
+        --labels "app=${APP},environment=${ENVIRONMENT},deployed-by=pipeline" \
+        --quiet
+    displayName: Deploy ${{ parameters.app }} to ${{ parameters.environment }}
+    env:
+      ENVIRONMENT: ${{ parameters.environment }}
+      IMAGE: ${{ parameters.image }}
+      APP: ${{ parameters.app }}
+      IAP: ${{ parameters.iap }}
+      MAX_INSTANCES: ${{ parameters.maxInstances }}
+      HEALTH_PATH: ${{ parameters.healthPath }}
+      SECRETS: ${{ parameters.secrets }}
+      ENV_VARS: ${{ parameters.envVars }}
+      PREFIX: $(gcpPrefix)
+      REGION: $(gcpRegion)
+      VERTEX_PROJECT: $(gcpVertexProject)

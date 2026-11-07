@@ -1,0 +1,47 @@
+# Keyless login to Google Cloud as deployer@ (Workload Identity Federation).
+#
+# 1. The oidctoken API only issues a token when a task of the job REFERENCES the service
+#    connection. The AzureCLI@2 below does that and never runs (condition: false): no Azure
+#    login happens. The reference is also what makes the service connection checks
+#    (pipeline authorization, Required template) apply to this job.
+# 2. The token is exchanged at Google STS and impersonates deployer@.
+# 3. gcloud and Docker configuration live in a job-private temp folder that
+#    gcp-cleanup.yml always deletes.
+steps:
+  - task: AzureCLI@2
+    displayName: Reference the service connection (never runs)
+    condition: false
+    inputs:
+      azureSubscription: ${{ variables.gcpServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: "true"
+
+  - bash: |
+      set -euo pipefail
+      umask 077
+      D="$AGENT_TEMPDIRECTORY/gcp"
+      mkdir -p "$D/gcloud" "$D/docker"
+      export CLOUDSDK_CONFIG="$D/gcloud" DOCKER_CONFIG="$D/docker"
+      echo "##vso[task.setvariable variable=CLOUDSDK_CONFIG]$CLOUDSDK_CONFIG"
+      echo "##vso[task.setvariable variable=DOCKER_CONFIG]$DOCKER_CONFIG"
+
+      URL="${SYSTEM_COLLECTIONURI}${SYSTEM_TEAMPROJECTID}/_apis/distributedtask/hubs/build/plans/${SYSTEM_PLANID}/jobs/${SYSTEM_JOBID}/oidctoken?serviceConnectionId=${SC_ID}&api-version=7.1-preview.1"
+      curl -sSf -X POST -H "Authorization: Bearer ${SYSTEM_ACCESSTOKEN}" \
+        -H "Content-Type: application/json" -d '{}' "$URL" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["oidcToken"])' > "$D/token"
+
+      gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+        --service-account="$DEPLOYER" \
+        --credential-source-file="$D/token" \
+        --output-file="$D/cred.json"
+      gcloud auth login --cred-file="$D/cred.json" --quiet
+      gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+      echo "Authenticated as: $(gcloud config get-value account 2>/dev/null)"
+    displayName: Google Cloud login (keyless, deployer@)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      SC_ID: $(gcpServiceConnectionId)
+      WIF_PROVIDER: $(gcpWorkloadIdentityProvider)
+      DEPLOYER: $(gcpDeployer)
+      REGION: $(gcpRegion)

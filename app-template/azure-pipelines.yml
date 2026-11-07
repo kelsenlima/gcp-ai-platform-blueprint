@@ -1,0 +1,30 @@
+# App pipeline. All the logic lives in templates/app.yml of the pipeline-templates repository;
+# the service connection only gives credentials to pipelines that extend that template.
+# Change only the parameters below.
+#
+#   develop -> build, push to the shared registry and deploy to dev
+#   main    -> promote to stage the SAME digest that runs in dev, without a new build.
+#              Complete the PR develop -> main with "Merge (no fast-forward)"; squash is refused.
+
+trigger:
+  branches:
+    include: [develop, main]
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: AIPlatform/pipeline-templates # <Azure DevOps project>/pipeline-templates
+      ref: refs/heads/main
+
+extends:
+  template: templates/app.yml@templates
+  parameters:
+    app: hello-app        # lowercase letters, digits and hyphens, up to 50 characters
+    iap: true             # true: app with a UI (Google sign-in) · false: internal API
+    maxInstances: 2
+    healthPath: /api/health
+    secretsDev: "DB_PASSWORD=ai-pg-dev-app-password:latest"
+    secretsStage: "DB_PASSWORD=ai-pg-stage-app-password:latest"
+    envVars: "DB_NAME=app,DB_USER=app"

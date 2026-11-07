@@ -1,0 +1,34 @@
+# Copy to terraform.tfvars (git-ignored) and replace every value. All values below are fictitious.
+
+prefix      = "acme-ai"
+environment = "stage"
+region      = "us-central1" # e.g. "southamerica-east1"
+subnet_cidr = "10.30.0.0/24"
+psa_cidr    = "10.31.0.0/16"
+
+sql_tier                = "db-g1-small"
+sql_deletion_protection = true
+sql_backup_start_time   = "05:00" # UTC
+db_name                 = "app"
+db_user                 = "app"
+sql_password_version    = 1
+sql_schedule            = false # stage has no schedule
+
+group_domain      = "example.com"
+group_admins_name = "ai-admins"
+group_devs_name   = "ai-devs"
+group_users_name  = "ai-users"
+
+vertex_project_id = ""
+vertex_location   = "global"
+vertex_model      = "gemini-2.5-flash"
+
+# Same image validated in dev (promotion by digest).
+hello_image             = "us-central1-docker.pkg.dev/acme-ai-shared/apps/hello@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+run_deletion_protection = true
+
+enable_network = true
+enable_sql     = false
+enable_iam     = false
+enable_run     = false
+enable_edge    = false
