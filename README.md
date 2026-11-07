@@ -189,6 +189,12 @@ docs/                 # federation setup and generic runbooks
 
 **This is a development and demo platform, not a production one.**
 
+- **Validation status.** This blueprint was derived from a real deployment that was built and
+  tested end to end. This generic version has only been checked statically
+  (`terraform fmt -check`, YAML lint, secret scan) and **has not yet been applied end to end in
+  a new organization**. The pipeline template **has not run in this form**: it was rewritten
+  from the tested behavior, so expect to debug the first runs.
+
 - No high availability: zonal shared-core Cloud SQL, no read replicas, no point-in-time recovery
   (7 daily backups).
 - No alerting, uptime checks or on-call: logs and metrics only.
@@ -228,3 +234,8 @@ proteções no Azure DevOps.
 
 **Limitações:** é um ambiente de desenvolvimento e demonstração, **não de produção**: sem alta
 disponibilidade, sem alertas, sem domínio próprio e sem análise de segurança no pipeline.
+Este blueprint foi derivado de uma implantação real, construída e testada de ponta a ponta.
+Esta versão genérica, porém, só passou por verificação estática (`terraform fmt -check`, lint
+dos YAML e varredura de segredos) e **ainda não foi aplicada de ponta a ponta numa organização
+nova**. O template do pipeline **não rodou nesta forma**: foi reescrito a partir do
+comportamento testado, então espere ajustes nas primeiras execuções.
