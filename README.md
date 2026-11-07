@@ -1,17 +1,39 @@
 # GCP AI Platform Blueprint
 
+**A keyless, cost-aware Google Cloud platform for shipping AI apps from commit to demo, with
+Azure DevOps pipelines.**
+
+[![Terraform](https://img.shields.io/badge/Terraform-%E2%89%A5%201.11-7B42BC?logo=terraform&logoColor=white)](infra/)
+[![Google Cloud](https://img.shields.io/badge/Google%20Cloud-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com/)
+[![Azure DevOps](https://img.shields.io/badge/Azure%20DevOps-0078D7?logo=azuredevops&logoColor=white)](pipeline-templates/)
+[![Cloud Run](https://img.shields.io/badge/Cloud%20Run-4285F4?logo=googlecloud&logoColor=white)](infra/modules/run-service/)
+[![Vertex AI](https://img.shields.io/badge/Vertex%20AI-Gemini-8E75B2?logo=googlegemini&logoColor=white)](app-template/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 <!-- ARCHITECTURE GIF: replace docs/architecture.gif to update the animation. -->
 ![Animated architecture diagram: a developer push triggers an Azure DevOps pipeline, which signs in to Google Cloud through keyless identity federation, pushes the image to Artifact Registry and deploys it to Cloud Run in dev, connected to Cloud SQL and Vertex AI; the same image is then promoted to Cloud Run in stage, where users sign in through IAP. Infrastructure is managed with Terraform.](docs/architecture.gif)
 
-A reusable Terraform blueprint for a small **Google Cloud platform for AI apps and internal
-demos** (portals, agents, prototypes built with AI coding tools), with **dev** and **stage**
-environments and **Azure DevOps** pipelines that deploy **without any service account key**.
+## 💡 Why this exists
 
-Apps run on Cloud Run behind IAP, talk to a private-IP-only Cloud SQL for PostgreSQL and call
-Gemini on Vertex AI. Stage only ever receives the **exact image (same digest)** that already
-ran in dev.
+Teams want to ship AI apps, portals and agents fast. The usual shortcuts get them there, but
+they leave a bill behind. A service account JSON key ends up in a pipeline variable. Someone
+deploys from a laptop and nobody knows which image runs in the demo. Environments stay on all
+night. An app goes public "just for the demo" with no sign-in. This blueprint takes those
+shortcuts away by making the safe path the easy one.
 
-## Architecture
+## ✨ Highlights
+
+| | |
+|---|---|
+| **Zero service account keys** | Azure DevOps pipelines sign in through Workload Identity Federation. Only one service connection of one organization can act as the deployer |
+| **Stage gets exactly what ran in dev** | `main` never builds. It promotes the same `sha256` digest that dev runs, or refuses |
+| **Sign-in without a load balancer** | IAP directly on Cloud Run with the Google-managed OAuth client. No certificate, no DNS records |
+| **Private database, secret-free state** | Cloud SQL with private IP only and TLS enforced. The password is write-only: never in the Terraform state or plan |
+| **Pay for use** | Cloud Run scales to zero with request-based billing. The dev database stops at night and on weekends |
+| **Manual builds can't reach stage** | Two registries: `apps` (pipeline only) and `apps-dev` (developers, dev only) |
+| **Everything in Terraform** | Additive IAM only, three groups for all human access, and a layered rollout you can validate step by step |
+
+## 🏗️ Architecture
 
 ```mermaid
 flowchart LR
@@ -62,57 +84,144 @@ flowchart LR
 Three groups drive all human access: **admins** (own the folder), **devs** (deploy and operate
 in dev, read-only in stage) and **users** (reach stage apps through IAP).
 
-## Key decisions and why
+## 🔁 How a commit becomes a demo
 
-| Decision | Why |
-|---|---|
-| **Keyless Azure DevOps → GCP federation** ([details](docs/azure-devops-federation.md)) | No service account key to leak or rotate. Only one service connection of one organization can act as `deployer@`; the Entra app has no secret and no Azure role |
-| **Two registries: `apps` and `apps-dev`** | Only the pipeline (`deployer@`) writes to `apps`, and stage only reads `apps`. Developers push manual builds to `apps-dev`, which only dev can pull, so a manual build can never reach stage |
-| **Promotion of the same image by digest** | `main` never builds. The pipeline takes the merge commit's **second parent** (the develop commit), checks that dev runs exactly that commit's image from `apps`, and deploys the same `sha256` digest to stage. Squash/rebase merges are refused |
-| **Required template + protected template repo** | Credentials are only issued to pipelines that extend the official template from `main`, which developers cannot modify |
-| **IAP directly on Cloud Run** | No load balancer, certificate or DNS records; the Google-managed OAuth client handles sign-in. IAP covers every entry point, including the `run.app` URL |
-| **Cloud SQL with private IP only** | No public address at all. Apps connect via Direct VPC egress with TLS enforced (`ENCRYPTED_ONLY`) |
-| **Write-only database password** | Generated as an ephemeral value and sent through `password_wo`/`secret_data_wo`: never in the state or the plan. Rotation = bump a version number |
-| **Org policy: no grants to default service accounts** | `iam.automaticIamGrantsForDefaultServiceAccounts` on the folder: nothing silently inherits `roles/editor`. Workloads use dedicated service accounts |
-| **Scheduled start/stop of the dev database** | Cloud Scheduler flips `activationPolicy`; the instance is only billed during working hours. Terraform ignores the flag, so there is no drift |
-| **State bucket readable by admins only** | Authoritative bucket IAM, plus a custom "bucket admin without data" role so Terraform keeps managing the bucket |
-| **Additive IAM only (`*_iam_member`)** | Never overwrites bindings created by Google or other teams, including in an external Vertex AI project |
-| **Layered rollout** (`enable_network` → `enable_sql` → `enable_iam` → `enable_run` → `enable_edge`) | Each layer is applied and validated before the next, without `-target` |
-| **Scale to zero, no HA, shared-core SQL** | It is a dev/demo platform: low fixed cost over availability |
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Dev as Developer
+  participant Repo as App repo
+  participant Pipe as Pipeline (official template)
+  participant GCP as Google STS and deployer@
+  participant Reg as Artifact Registry (apps)
+  participant RunDev as Cloud Run dev
+  participant RunStg as Cloud Run stage
 
-## Repository layout
+  Dev->>Repo: push to develop
+  Repo->>Pipe: trigger
+  Pipe->>Pipe: Validate app name, parameters and branch
+  Pipe->>GCP: exchange the OIDC token (no key)
+  GCP-->>Pipe: short-lived deployer@ credentials
+  Pipe->>Reg: build and push apps/APP:COMMIT
+  Pipe->>RunDev: deploy APP@sha256 digest
 
+  Dev->>Repo: PR develop to main, Merge (no fast-forward)
+  Repo->>Pipe: trigger on main (no build)
+  Pipe->>Pipe: take the second parent of the merge commit
+  alt merge commit has one parent (squash or rebase)
+    Pipe--xDev: refused, nothing deployed
+  else merged commit was never published by the pipeline
+    Pipe--xDev: refused
+  else dev runs an image outside apps (manual build from apps-dev)
+    Pipe--xDev: refused
+  else dev runs a different digest than the merged commit
+    Pipe--xDev: refused
+  else all checks pass
+    Pipe->>RunStg: deploy the same digest
+  end
+  Note over Pipe: Credentials are deleted at the end of every job, even on failure
 ```
-infra/
-├── bootstrap/        # folder, 3 projects, groups, org policy, state bucket, registries, deployer@, WIF
-├── modules/
-│   ├── project/      # project + APIs + labels
-│   ├── network/      # custom VPC, subnet, Private Service Access
-│   ├── cloudsql/     # Postgres 16, private IP, write-only password + secret
-│   └── run-service/  # Cloud Run v2 service (Direct VPC egress, probes, IAP)
-└── envs/
-    ├── dev/          # layers 1-5 + start/stop schedule
-    └── stage/        # same code, stage values
-pipeline-templates/   # Azure DevOps template repo (Validate, Build, Deploy, Promote)
-app-template/         # example app: Flask, Dockerfile, .dockerignore, azure-pipelines.yml
-docs/                 # federation setup and generic runbooks
+
+The refusal messages and how to fix each one are in
+[pipeline-templates/README.md](pipeline-templates/README.md).
+
+## 🛡️ Security model
+
+Defense in depth: each layer blocks something on its own.
+
+| # | Layer | What it prevents | Where |
+|---|---|---|---|
+| 1 | Branch policy on `main`: PRs only, *Merge (no fast-forward)* only | Direct pushes; squash/rebase commits that never ran in dev | Azure DevOps settings ([documented](pipeline-templates/README.md)) |
+| 2 | Protected `pipeline-templates` repo (required reviewers, *Deny* for contributors) | Developers editing the template that grants cloud access | Azure DevOps settings |
+| 3 | Service connection not open to all pipelines | A new pipeline getting credentials without an admin's review | Azure DevOps settings |
+| 4 | *Required template* check | Pipelines that do not extend the official template from `main` | Azure DevOps settings |
+| 5 | Federation condition + `workloadIdentityUser` for one subject only | Other organizations or service connections acting as `deployer@` | [`infra/bootstrap/azdo.tf`](infra/bootstrap/azdo.tf) |
+| 6 | Validate and Promote stages | Invalid parameters, wrong branch, single-parent commits, images outside `apps`, digest mismatch | [`pipeline-templates/templates/app.yml`](pipeline-templates/templates/app.yml) |
+| 7 | Per-repository registry IAM | Developers writing to `apps`; stage pulling from `apps-dev` | [`infra/bootstrap/shared.tf`](infra/bootstrap/shared.tf), [`infra/envs/*/iam.tf`](infra/envs/dev/iam.tf) |
+| 8 | Stage IAM: developers read-only, only the pipeline acts as `deployer@` | Direct deploys to stage; developers reading stage secrets or the database | [`infra/envs/*/iam.tf`](infra/envs/dev/iam.tf), [`infra/bootstrap/iam.tf`](infra/bootstrap/iam.tf) |
+| 9 | IAP on Cloud Run, no `allUsers` invoker | Anonymous access to apps | [`infra/envs/*/edge.tf`](infra/envs/dev/edge.tf) |
+| 10 | Org policy on the folder: no automatic grants to default service accounts | Workloads silently inheriting `roles/editor` | [`infra/bootstrap/policies.tf`](infra/bootstrap/policies.tf) |
+| 11 | Private-IP-only Cloud SQL, TLS enforced, write-only password, state bucket for admins only | Database exposure on the internet; secrets leaking through the state | [`infra/modules/cloudsql`](infra/modules/cloudsql/), [`infra/bootstrap/shared.tf`](infra/bootstrap/shared.tf) |
+
+**No layer relies on another one alone.** For example, if the template had a bug, the registry
+IAM would still stop stage from pulling a manual build.
+
+## ⚖️ Design decisions and trade-offs
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Keyless Azure DevOps → GCP federation ([details](docs/azure-devops-federation.md)) | No key to leak or rotate; the Entra app has no secret and no Azure role | More moving parts (Entra app, service connection, WIF pool) and a token flow that is specific to Azure DevOps |
+| Two registries: `apps` and `apps-dev` | A manual build can never become the stage image | Two repositories with different cleanup rules; developers cannot promote a manual build |
+| Promotion by the merge commit's second parent and digest | Stage receives exactly what ran in dev, without a rebuild | `main` only accepts *Merge (no fast-forward)*; no hotfix straight to `main` |
+| Required, protected template | Security logic stays out of app teams' reach | App teams cannot customize stages; template changes go through admins |
+| IAP directly on Cloud Run | No load balancer, certificate or DNS | `*.run.app` URLs only; browser sign-in only, so service-to-service calls need internal APIs with IAM ID tokens |
+| Cloud SQL with private IP only | No public database endpoint at all | No direct connection from a laptop without a path into the VPC |
+| Write-only database password | Never in the state or the plan | Needs Terraform ≥ 1.11; rotation requires new revisions of running apps; the plan cannot detect password drift |
+| Org policy: no default service account grants | Nothing silently gets `roles/editor` | Every workload needs explicit roles on a dedicated service account |
+| Scheduled start/stop of the dev database | The dev instance runs only during working hours | Starting takes about 10-15 minutes; the backup window must fall while it runs |
+| State bucket readable by admins only | The state is not readable by every project owner | A custom role is needed so Terraform keeps managing its own bucket; others cannot read outputs |
+| Additive IAM only (`*_iam_member`) | Never overwrites bindings made by Google or other teams | Bindings added by hand are neither removed nor reported |
+| Layered rollout (`enable_network` → … → `enable_edge`) | Each layer is applied and checked before the next, without `-target` | More plan/apply cycles on the first deployment |
+| Scale to zero, zonal shared-core SQL, no HA | Low fixed cost for dev and demos | Cold starts; no failover |
+
+## 💰 Cost-conscious by design
+
+| Choice | Effect | Where |
+|---|---|---|
+| Cloud Run scales to zero, request-based CPU billing | Idle apps cost nothing to run | [`infra/modules/run-service`](infra/modules/run-service/), [`deploy.yml`](pipeline-templates/templates/steps/deploy.yml) |
+| Dev database on a weekday schedule | The instance is stopped at night and on weekends | [`infra/envs/dev/main.tf`](infra/envs/dev/main.tf) |
+| IAP directly on Cloud Run | No load balancer per environment | [`infra/envs/*/edge.tf`](infra/envs/dev/edge.tf) |
+| Direct VPC egress | No Serverless VPC Access connector instances | [`infra/modules/run-service`](infra/modules/run-service/) |
+| Shared-core, zonal Cloud SQL tiers | Smallest instances that fit dev and demo loads | [`terraform.tfvars.example`](infra/envs/dev/terraform.tfvars.example) |
+| Registry cleanup policies | `apps` keeps 20 versions per image; `apps-dev` keeps 5 and deletes the rest after 7 days | [`infra/bootstrap/shared.tf`](infra/bootstrap/shared.tf) |
+| Labels on Vertex AI calls (`environment`, `app`) | Model cost can be split per app and environment in billing reports | [`app-template/main.py`](app-template/main.py) |
+
+## 📚 Lessons learned
+
+These come from the real-world implementation this blueprint was derived from.
+
+| Story | What happened | What fixed it |
+|---|---|---|
+| **The inherited Deny** | Administrators lost access to the template repository. They were in a team that belonged to Contributors, and an inherited *Deny* beats *Allow* in Azure DevOps. Making a group a team administrator also makes it a team member | Keep administrators out of Contributors, directly or through a team; use an empty group as team administrator |
+| **The role combination that skipped the pipeline** | Leftovers from an earlier design let developers run a cloud build as the deploy identity, and write any image to the registry the pipeline promoted from. Together, that was a way to reach stage without the pipeline | Removed those roles; `apps` writable only by the deployer, `apps-dev` for developers, stage reads `apps` only, and the template refuses anything else |
+| **The token that would not come** | The Azure DevOps `oidctoken` API returned *HTTP 400 "no explicit reference to service connection"* | A task in the job must reference the service connection. An `AzureCLI@2` task with `condition: false` does it without ever running |
+| **The password that stayed warm** | After a password rotation, warm Cloud Run instances kept the old password, so new database connections failed until new instances started | `DB_PASSWORD_VERSION` forces a new revision for Terraform-managed services; a [runbook](docs/runbooks/rotate-db-password.md) covers the rest |
+| **The bucket that locked out Terraform** | An authoritative IAM policy on a bucket removed the access Terraform itself needed to read it | A custom "bucket admin without object access" role for admins, included in the policy |
+
+## 🚀 Quick start
+
+```bash
+# 1. Bootstrap: folder, projects, groups, registries, federation (local state first)
+cd infra/bootstrap && cp terraform.tfvars.example terraform.tfvars   # edit values
+mv backend.tf backend.tf.off && terraform init && terraform apply
+mv backend.tf.off backend.tf && terraform init -migrate-state -backend-config="bucket=<prefix>-tfstate"
+
+# 2. Environments, one layer at a time (enable_network → enable_sql → enable_iam → enable_run → enable_edge)
+cd ../envs/dev && cp terraform.tfvars.example terraform.tfvars
+terraform init -backend-config="bucket=<prefix>-tfstate" && terraform plan
+
+# 3. Azure DevOps: publish pipeline-templates/, fill platform-vars.yml, create an app from app-template/
 ```
 
-## Prerequisites
+The full procedure, with prerequisites and checks, is below.
+
+## Deploy to your own organization
+
+### Prerequisites
 
 - A Google Cloud **organization** and a **billing account**. The identity running Terraform needs,
   at organization level: `roles/resourcemanager.folderCreator`,
   `roles/resourcemanager.projectCreator`, `roles/billing.user` and `roles/orgpolicy.policyAdmin`.
 - To let Terraform create the groups: **Groups Admin** in the Google Workspace / Cloud Identity
   directory (or set `manage_groups = false` and create the three groups yourself).
-- Terraform **>= 1.11** (write-only arguments), `gcloud`, Docker.
+- Terraform **≥ 1.11** (write-only arguments), `gcloud`, Docker.
 - `gcloud auth application-default login` with that identity.
 - An **Azure DevOps** project where you are Project Administrator, and permission to create an
   app registration in the **Microsoft Entra** tenant connected to the organization.
 - Two free private IP ranges per environment (a `/24` subnet and a `/16` for Private Service
   Access) that do not overlap with networks you connect to.
 
-## Deploy to your own organization
+### Steps
 
 > Run every `plan` and read it before `apply`. Never use `-auto-approve`.
 
@@ -178,35 +287,69 @@ docs/                 # federation setup and generic runbooks
    Open the stage URL in a browser: Google sign-in, then `/api/health`, `/api/check/db` and
    `/api/check/vertex` should all answer `ok`. An account outside the groups must be denied.
 
-### Runbooks
+## Repository layout
 
-- [Rotate the database password](docs/runbooks/rotate-db-password.md)
-- [Start and stop the dev database](docs/runbooks/start-stop-dev-database.md)
-- [Restore a backup](docs/runbooks/restore-backup.md)
-- [Semiannual review](docs/runbooks/semiannual-review.md)
+```
+infra/
+├── bootstrap/        # folder, 3 projects, groups, org policy, state bucket, registries, deployer@, WIF
+├── modules/
+│   ├── project/      # project + APIs + labels
+│   ├── network/      # custom VPC, subnet, Private Service Access
+│   ├── cloudsql/     # Postgres 16, private IP, write-only password + secret
+│   └── run-service/  # Cloud Run v2 service (Direct VPC egress, probes, IAP)
+└── envs/
+    ├── dev/          # layers 1-5 + start/stop schedule
+    └── stage/        # same code, stage values
+pipeline-templates/   # Azure DevOps template repo (Validate, Build, Deploy, Promote)
+app-template/         # example app: Flask, Dockerfile, .dockerignore, azure-pipelines.yml
+docs/                 # federation setup, generic runbooks, architecture animation
+```
 
-## Limitations
+## Runbooks
+
+| Runbook | When |
+|---|---|
+| [Rotate the database password](docs/runbooks/rotate-db-password.md) | Periodically, or after a suspected leak |
+| [Start and stop the dev database](docs/runbooks/start-stop-dev-database.md) | Working outside the schedule, or changing it |
+| [Restore a backup](docs/runbooks/restore-backup.md) | Testing backups, recovering data, or a lost database |
+| [Semiannual review](docs/runbooks/semiannual-review.md) | Every six months: access, pipelines, drift, cost |
+
+## 🧭 Limitations and roadmap
 
 **This is a development and demo platform, not a production one.**
 
-- **Validation status.** This blueprint was derived from a real deployment that was built and
-  tested end to end. This generic version has only been checked statically
-  (`terraform fmt -check`, YAML lint, secret scan) and **has not yet been applied end to end in
-  a new organization**. The pipeline template **has not run in this form**: it was rewritten
-  from the tested behavior, so expect to debug the first runs.
+**Validation status.** This blueprint was derived from a real deployment that was built and
+tested end to end. This generic version has only been checked statically
+(`terraform fmt -check`, YAML lint, secret scan) and **has not yet been applied end to end in a
+new organization**. The pipeline template **has not run in this form**: it was rewritten from
+the tested behavior, so expect to debug the first runs.
 
-- No high availability: zonal shared-core Cloud SQL, no read replicas, no point-in-time recovery
-  (7 daily backups).
-- No alerting, uptime checks or on-call: logs and metrics only.
-- Apps are reached through `*.run.app` URLs with IAP; no custom domain, load balancer or Cloud
-  Armor. IAP with the Google-managed OAuth client only supports browser sign-in, so
-  service-to-service calls use internal APIs (`iap: false`) with IAM ID tokens.
-- Cloud SQL has no public IP: connecting from a laptop needs a path into the VPC (e.g. a bastion
-  with IAP TCP forwarding), which is not included.
-- One region, one VPC per environment, no Shared VPC, no VPC Service Controls.
-- The pipeline has no security scanning stage (SAST, image scanning); add your own.
-- A production environment would need its own project, a promotion stage → prod by digest with
-  manual approval, HA database, alerting and a security review.
+| Limitation | Detail |
+|---|---|
+| No high availability | Zonal shared-core Cloud SQL, no replicas, no point-in-time recovery (7 daily backups) |
+| No alerting | Logs and metrics only; no uptime checks or on-call |
+| No custom domain | `*.run.app` URLs with IAP; no load balancer or Cloud Armor. Browser sign-in only, so service-to-service calls use internal APIs (`iap: false`) with IAM ID tokens |
+| No laptop access to the database | Cloud SQL has no public IP; a path into the VPC (e.g. a bastion with IAP TCP forwarding) is not included |
+| Simple network | One region, one VPC per environment, no Shared VPC, no VPC Service Controls |
+| No security scanning | The pipeline has no SAST or image scanning stage |
+
+**Roadmap** (not implemented):
+
+| Item | Idea |
+|---|---|
+| Production environment | A `prod` project with the same modules, promoted from stage by digest with manual approval, HA database |
+| Alerting | Uptime checks, 5xx/latency alerts, database and budget alerts with a notification channel |
+| Security scanning | SAST and container image scanning as a pipeline stage |
+| Policy as code | Automated checks of Terraform and IAM against written policies before apply |
+
+## 👤 About the author
+
+Built by **Kelsen Lima**, Head of IT, based on a real-world implementation.
+*Governed AI. Measurable Impact.*
+
+[LinkedIn](https://www.linkedin.com/in/kelsenlima) ·
+[Blog](https://planningit.wordpress.com) ·
+[GitHub](https://github.com/kelsenlima)
 
 ## License
 
@@ -214,18 +357,23 @@ docs/                 # federation setup and generic runbooks
 
 ---
 
-## Resumo em português
+## 🇧🇷 Resumo em português
 
-**O que é:** um blueprint em Terraform de uma plataforma pequena no Google Cloud para apps e
-demos de IA, com ambientes **dev** e **stage**, Cloud Run com IAP, Cloud SQL só com IP privado,
-Vertex AI (Gemini) e pipelines do **Azure DevOps** que fazem deploy **sem chave de service
-account**.
+**O que é:** um blueprint em Terraform de uma plataforma no Google Cloud para publicar apps e
+agentes de IA do commit até a demo, com ambientes **dev** e **stage**, Cloud Run com IAP, Cloud
+SQL só com IP privado, Vertex AI (Gemini) e pipelines do **Azure DevOps** sem nenhuma chave de
+service account.
 
-**Decisões principais:** federação do Azure DevOps sem chave; repositórios `apps` (só o
-pipeline grava, stage só lê) e `apps-dev` (builds manuais, só dev); promoção para stage da
-**mesma imagem por digest**, pelo segundo pai do merge, sem novo build; IAP direto no Cloud Run,
-sem load balancer; Cloud SQL só com IP privado e senha *write-only*; org policy que impede
-permissões automáticas nas contas de serviço padrão; banco de dev com liga/desliga agendado.
+**Por que existe:** os atalhos comuns (chaves JSON, deploy a partir do notebook, ambientes
+sempre ligados, apps públicas sem login) viram risco e custo. Aqui, o caminho seguro é o mais
+fácil.
+
+**Destaques:** federação do Azure DevOps sem chave; stage recebe exatamente o digest que rodou
+em dev, pelo segundo pai do merge, sem novo build; repositórios `apps` (só o pipeline grava) e
+`apps-dev` (builds manuais, só dev); IAP direto no Cloud Run, sem load balancer; Cloud SQL só
+privado, com senha *write-only* fora do state; escala a zero e banco de dev com liga/desliga
+agendado; org policy que impede permissões automáticas nas contas de serviço padrão; tudo em
+Terraform, com IAM aditivo e defesa em camadas.
 
 **Como usar:** preencha os `terraform.tfvars.example` (todos os valores são fictícios), rode o
 `infra/bootstrap` com state local e migre para o bucket, depois `infra/envs/dev` e
@@ -239,3 +387,5 @@ Esta versão genérica, porém, só passou por verificação estática (`terrafo
 dos YAML e varredura de segredos) e **ainda não foi aplicada de ponta a ponta numa organização
 nova**. O template do pipeline **não rodou nesta forma**: foi reescrito a partir do
 comportamento testado, então espere ajustes nas primeiras execuções.
+
+**Autor:** Kelsen Lima, Head of IT, a partir de uma implementação real.
