@@ -1,5 +1,7 @@
 # GCP AI Platform Blueprint
 
+🇺🇸 English · [🇧🇷 Português](README.pt-BR.md)
+
 **A keyless, cost-aware Google Cloud platform for shipping AI apps from commit to demo, with
 Azure DevOps pipelines.**
 
@@ -21,9 +23,15 @@ deploys from a laptop and nobody knows which image runs in the demo. Environment
 night. An app goes public "just for the demo" with no sign-in. This blueprint takes those
 shortcuts away by making the safe path the easy one.
 
+## 🎯 Who is this for
+
+- **Platform and DevOps teams** that need a safe default for AI apps.
+- **IT leaders** who want to enable AI without losing governance.
+- **Teams running Azure DevOps with Google Cloud.**
+
 ## ✨ Highlights
 
-| | |
+| Feature | What it means |
 |---|---|
 | **Zero service account keys** | Azure DevOps pipelines sign in through Workload Identity Federation. Only one service connection of one organization can act as the deployer |
 | **Stage gets exactly what ran in dev** | `main` never builds. It promotes the same `sha256` digest that dev runs, or refuses |
@@ -183,7 +191,7 @@ These come from the real-world implementation this blueprint was derived from.
 | Story | What happened | What fixed it |
 |---|---|---|
 | **The inherited Deny** | Administrators lost access to the template repository. They were in a team that belonged to Contributors, and an inherited *Deny* beats *Allow* in Azure DevOps. Making a group a team administrator also makes it a team member | Keep administrators out of Contributors, directly or through a team; use an empty group as team administrator |
-| **The role combination that skipped the pipeline** | Leftovers from an earlier design let developers run a cloud build as the deploy identity, and write any image to the registry the pipeline promoted from. Together, that was a way to reach stage without the pipeline | Removed those roles; `apps` writable only by the deployer, `apps-dev` for developers, stage reads `apps` only, and the template refuses anything else |
+| **The role combination that skipped the pipeline** | Leftovers from an earlier design let developers run a cloud build as the deploy identity, and write any image to the registry the pipeline promoted from. Together, that was a way to reach stage without the pipeline. The gap was found in a review, before any developer had access to the platform | Removed those roles; `apps` writable only by the deployer, `apps-dev` for developers, stage reads `apps` only, and the template refuses anything else |
 | **The token that would not come** | The Azure DevOps `oidctoken` API returned *HTTP 400 "no explicit reference to service connection"* | A task in the job must reference the service connection. An `AzureCLI@2` task with `condition: false` does it without ever running |
 | **The password that stayed warm** | After a password rotation, warm Cloud Run instances kept the old password, so new database connections failed until new instances started | `DB_PASSWORD_VERSION` forces a new revision for Terraform-managed services; a [runbook](docs/runbooks/rotate-db-password.md) covers the rest |
 | **The bucket that locked out Terraform** | An authoritative IAM policy on a bucket removed the access Terraform itself needed to read it | A custom "bucket admin without object access" role for admins, included in the policy |
@@ -193,7 +201,7 @@ These come from the real-world implementation this blueprint was derived from.
 ```bash
 # 1. Bootstrap: folder, projects, groups, registries, federation (local state first)
 cd infra/bootstrap && cp terraform.tfvars.example terraform.tfvars   # edit values
-mv backend.tf backend.tf.off && terraform init && terraform apply
+mv backend.tf backend.tf.off && terraform init && terraform plan && terraform apply
 mv backend.tf.off backend.tf && terraform init -migrate-state -backend-config="bucket=<prefix>-tfstate"
 
 # 2. Environments, one layer at a time (enable_network → enable_sql → enable_iam → enable_run → enable_edge)
@@ -319,10 +327,11 @@ docs/                 # federation setup, generic runbooks, architecture animati
 **This is a development and demo platform, not a production one.**
 
 **Validation status.** This blueprint was derived from a real deployment that was built and
-tested end to end. This generic version has only been checked statically
-(`terraform fmt -check`, YAML lint, secret scan) and **has not yet been applied end to end in a
-new organization**. The pipeline template **has not run in this form**: it was rewritten from
-the tested behavior, so expect to debug the first runs.
+tested end to end. This generic version has been checked with `terraform fmt -check`,
+`terraform validate` (passing in `bootstrap`, `dev` and `stage`), YAML lint and a secret scan,
+but **has not yet been applied end to end in a new organization**. The pipeline template
+**has not run in this form**: it was rewritten from the tested behavior, so expect to debug the
+first runs.
 
 | Limitation | Detail |
 |---|---|
@@ -351,41 +360,10 @@ Built by **Kelsen Lima**, Head of IT, based on a real-world implementation.
 [Blog](https://planningit.wordpress.com) ·
 [GitHub](https://github.com/kelsenlima)
 
+If this blueprint helps you, star the repo or connect with me on LinkedIn: I'd like to hear how
+you adapted it.
+
 ## License
 
 [Apache License 2.0](LICENSE).
 
----
-
-## 🇧🇷 Resumo em português
-
-**O que é:** um blueprint em Terraform de uma plataforma no Google Cloud para publicar apps e
-agentes de IA do commit até a demo, com ambientes **dev** e **stage**, Cloud Run com IAP, Cloud
-SQL só com IP privado, Vertex AI (Gemini) e pipelines do **Azure DevOps** sem nenhuma chave de
-service account.
-
-**Por que existe:** os atalhos comuns (chaves JSON, deploy a partir do notebook, ambientes
-sempre ligados, apps públicas sem login) viram risco e custo. Aqui, o caminho seguro é o mais
-fácil.
-
-**Destaques:** federação do Azure DevOps sem chave; stage recebe exatamente o digest que rodou
-em dev, pelo segundo pai do merge, sem novo build; repositórios `apps` (só o pipeline grava) e
-`apps-dev` (builds manuais, só dev); IAP direto no Cloud Run, sem load balancer; Cloud SQL só
-privado, com senha *write-only* fora do state; escala a zero e banco de dev com liga/desliga
-agendado; org policy que impede permissões automáticas nas contas de serviço padrão; tudo em
-Terraform, com IAM aditivo e defesa em camadas.
-
-**Como usar:** preencha os `terraform.tfvars.example` (todos os valores são fictícios), rode o
-`infra/bootstrap` com state local e migre para o bucket, depois `infra/envs/dev` e
-`infra/envs/stage` camada por camada, e configure o repositório `pipeline-templates` e as
-proteções no Azure DevOps.
-
-**Limitações:** é um ambiente de desenvolvimento e demonstração, **não de produção**: sem alta
-disponibilidade, sem alertas, sem domínio próprio e sem análise de segurança no pipeline.
-Este blueprint foi derivado de uma implantação real, construída e testada de ponta a ponta.
-Esta versão genérica, porém, só passou por verificação estática (`terraform fmt -check`, lint
-dos YAML e varredura de segredos) e **ainda não foi aplicada de ponta a ponta numa organização
-nova**. O template do pipeline **não rodou nesta forma**: foi reescrito a partir do
-comportamento testado, então espere ajustes nas primeiras execuções.
-
-**Autor:** Kelsen Lima, Head of IT, a partir de uma implementação real.

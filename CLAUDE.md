@@ -16,6 +16,8 @@ and the reasoning behind each decision.
   prefix differ. Change both directories together and keep them identical.
 - `pipeline-templates` - Azure DevOps template repo (Validate, Build, Deploy to dev, Promote).
 - `app-template` - example app and the `azure-pipelines.yml` that extends the template.
+- `README.md` (English) and `README.pt-BR.md` (Brazilian Portuguese) - the same content in two
+  languages. Always update both together, keeping sections, tables, diagrams and links in sync.
 
 ## Rules
 
